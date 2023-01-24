@@ -9,50 +9,70 @@ from datetime import datetime
 
 # Working version - saving to TXT files
 
-def set_API(apikey, resource_id): # Generate your own API key here: https://api.um.warszawa.pl/# --> Hit 'logowanie' and then under 'Rejestracja konta' provide a login and password
-    vehicle_type = input('Wpisz "1" dla autobusów lub "2" dla tramwajów ') #API link parameter
+def set_API(API_KEY, resource_id):
+    vehicle_type = input('Insert "1" for buses or "2" for trams ') #API link parameter
     if vehicle_type == 1:
         set_API.prefix = 'buses_'
-    else: 
+    else:
         set_API.prefix = 'trams_'
-    set_API.target_time = datetime.strptime(input('Do kiedy zbierać dane? (w formacie: YYYY-MM-DD HH:MM:SS) - domyślnie do końca 2023 roku') or '2023-12-31 23:59:59', '%Y-%m-%d %H:%M:%S') #Datetime to which the while lopp will run
+    set_API.target_time = datetime.strptime(input('Until when to collect data? (please input datetime in format: YYYY-MM-DD HH:MM:SS) - default: till the end of year 2023 ') or '2023-12-31 23:59:59', '%Y-%m-%d %H:%M:%S') #Datetime to which the while lopp will run
+    print('https://api.um.warszawa.pl/api/action/busestrams_get/?resource_id=%20' + resource_id \
+    + '&apikey=' + API_KEY \
+    + '&type=' + vehicle_type)
     set_API.link = 'https://api.um.warszawa.pl/api/action/busestrams_get/?resource_id=%20' + resource_id \
-    + '&apikey=' + apikey \
+    + '&apikey=' + API_KEY \
     + '&type=' + vehicle_type
 
-    
+
 def init_logging(logs: logging.Logger, file_name: str) -> logging.Logger:
     """
-    Funkcja do logowania informacji jednocześnie do konsoli i do pliku
-
+    Log information to the console and file
     Arguments:
-        logs: Domyślny logger z modułu logging
-        file_name: nazwa pliku, do którego mają być logowane dane
-    
+        logs: Default logger from logging module
+        file_name: log filename
     Returns:
-        Obiekt 'logs' z określonym formatem wpisów jakie mają być w nim umieszczane i
-        wskazanym plikiem do zapisywania logów.
+        Logs object with specified log format and name of log file
     """
     logs.setLevel(logging.DEBUG)
-    
+
     logformat = logging.Formatter("%(asctime)s : %(levelname)s : %(message)s",datefmt='%y-%m-%d %H:%M:%S')
 
-    # logowanie do pliku
+    # log to file
     file = logging.FileHandler(file_name)
     file.setLevel(logging.INFO)
     file.setFormatter(logformat)
-    
-    # logowanie do konsoli
+
+    # log to console
     stream = logging.StreamHandler()
     stream.setLevel(logging.INFO)
     stream.setFormatter(logformat)
 
-    logs.addHandler(stream)    
+    logs.addHandler(stream)
     logs.addHandler(file)
 
     return logs
-    
-def sendemail(from_email, application_password, to_email): # The script is configured send emails from Gmail account - insert your parameters here.
+
+
+def load_api_key(credentials_file_name: str = 'credentials.json'):
+    """
+    Get API key from file
+    Arguments:
+        credentials_file_name: name of file where the API key is located
+    Returns:
+        API key needed for further requests
+    """
+    if os.path.exists(credentials_file_name):
+        with open(credentials_file_name) as f:
+            API_KEY = json.load(f)['API_KEY']
+    else:
+        init_logging.logs.error(f"No file {credentials_file_name} with proper API key")
+        input('Press any key to end.')
+        exit()
+
+    return API_KEY
+
+
+def sendemail(gmail_user, gmail_password, sent_to):
     body = run_script.err.__class__.__name__ + ' occured at ' + str(run_script.current_time) #Error type and occurence time in the message
     email_text = """\
     From: %s,
@@ -62,17 +82,20 @@ def sendemail(from_email, application_password, to_email): # The script is confi
     """ % (gmail_user, body)
 
     try:
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465) #Setting server to gmail
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)  # Setting the server for Gmail (you may need to set different parameters for your mailbox)
         server.ehlo()
-        server.login(gmail_user, gmail_password) #Authentication of gmail account, application key is required - to be set on google account
-        server.sendmail(gmail_user, sent_to, email_text)
+        server.login(gmail_user,
+                     gmail_password)  # Authentication of gmail account, application key is required - to be set on google account
+        server.sendmail(gmail_user, send_to, email_text)
         server.close()
         print('email sent')
     except:
-        print('SOMETHING WENT TERRIBLY WRONG WHEN SENDING EMAIL!')
+        print('SOMETHING WENT TERRIBLY WRONG WHEN SENDING THE EMAIL! Have you provided parameters for sendmail function?')
+
 
 def run_script():
-    set_API(apikey, 'f2e5503e-927d-4ad3-9500-4ab9e55deb59') 
+    API_KEY = load_api_key()
+    set_API(API_KEY, resource_id = 'f2e5503e-927d-4ad3-9500-4ab9e55deb59')
     requested_data = requests.get(set_API.link)
     json_dictionary = requested_data.json()
     df = pd.json_normalize(json_dictionary['result'])
@@ -105,6 +128,7 @@ def run_script():
                     os.chdir(base_folder)
                     os.makedirs(os.path.join(base_folder, str(new_time.month) + '_' + str(new_time.year)), exist_ok = True)
                     os.chdir((os.path.join(base_folder, str(new_time.month) + '_' + str(new_time.year))))
+                    cwd = os.getcwd()
         except AttributeError as err:
             logs.error('Attribute error occurred! ' + str(err))
         except (ConnectionError, TimeoutError) as err:
@@ -115,8 +139,8 @@ def run_script():
             logs.error('NotImplementedError Error occurred! ' + str(err))
         except KeyError as err:
             logs.error('Key Error occurred! ' + str(err))
-        except Exception as err:
-            sendemail(from_email, application_password, to_email) 
+        except Exception:
+            sendemail(gmail_user, gmail_password, send_to) # provide your email credentials along with specific app password
             continue
 
 run_script()
