@@ -7,71 +7,155 @@ from datetime import datetime
 import json
 import logging
 import os
+import smtplib
+import func_timeout
+import schedule
+from typing import Any, Callable
 
 # disable SettingWithCopyWarning
 pd.options.mode.chained_assignment = None
 
+def sendemail(gmail_user, gmail_password, send_to):
+    #body = get_data_from_link.err.__class__.__name__ + ' occured at ' + str(
+    body = 'Error occured at ' + str(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"))  # Error type and occurence time in the message
+    email_text = """\
+    From: %s,
+
+
+    %s
+    """ % (gmail_user, body)
+
+    try:
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)  # Setting the server for Gmail (you may need to set different parameters for your mailbox)
+        server.ehlo()
+        server.login(gmail_user,
+                     gmail_password)  # Authentication of gmail account, application key is required - to be set on google account
+        server.sendmail(gmail_user, send_to, email_text)
+        server.close()
+        print('email sent')
+    except:
+        print('SOMETHING WENT TERRIBLY WRONG WHEN SENDING THE EMAIL! Have you provided parameters for sendmail function?')
+
 
 def get_data_from_link(link: str) -> dict:
     """
-    Pobierz dane z API UM Warszawa na podstawie linku
+    Geta data from API UM Warszawa based on a link
     Arguments:
-        link: link z zapytaniem do API
+        link: API request link
     Returns:
-        Słownik w formacie JSON, będący podstawą do utworzenia tabel
+        A dictionary in JSON format, which will be used for creating dataframes
     """
-    try:
-        requested_data = requests.get(link)
-        json_dictionary = requested_data.json()
 
-    except AttributeError as err:
-        logs.error('Attribute error occurred! ' + str(err))
-    except (ConnectionError, TimeoutError) as err:
-        logs.error('Connection error occurred! ' + str(err))
-    except OSError as err:
-        logs.error('OS error occurred! ' + str(err))
-    except NotImplementedError as err:
-        logs.error('NotImplementedError Error occurred! ' + str(err))
-    except KeyError as err:
-        logs.error('Key Error occurred! ' + str(err))
+    def make_json_dictionary() -> dict:
+        """
+        Output a JSON dictionary based on a link
+        """
+        requested_data = requests.get(link)
+        return requested_data.json()
+
+    def run_function(f: Callable, max_wait: int, default_value: Any):
+        """
+        Run make_json_dictionary function, if it takes longer the 'max_wait'
+        seconds to complete, output 'default_value'
+        Arguments:
+            f: a callable function (in this case make_json_dictionary)
+            max_wait: maximal number of seconds we want the f function to run for
+        Return:
+            Output of make_json_dictionary function or 'default_value'
+
+        """
+        try:
+            return func_timeout.func_timeout(max_wait, make_json_dictionary)
+        except func_timeout.FunctionTimedOut:
+            pass
+        return default_value
+
+    for i in range(1, 6):
+        try:
+            json_dictionary = run_function(make_json_dictionary, 10, None)
+        except AttributeError as err:
+            logs.error('Attribute error occurred! ' + str(err))
+            continue
+        except (ConnectionError, TimeoutError) as err:
+            logs.error('Connection error occurred! ' + str(err))
+            continue
+        except TimeoutError as err:
+            logs.error('Timeout Error occurred! ' + str(err))
+            continue
+        except OSError as err:
+            logs.error('OS error occurred! ' + str(err))
+            continue
+        except NotImplementedError as err:
+            logs.error('NotImplementedError Error occurred! ' + str(err))
+            continue
+        except KeyError as err:
+            logs.error('Key Error occurred! ' + str(err))
+            continue
+        except Exception:
+            logs.error('Unknown exception accured. Sending email just to let you know.')
+            sendemail(gmail_user, gmail_password, send_to) # provide your email credentials along with specific app password
+        if (json_dictionary != None) and ('result' in json_dictionary) and (
+                type(json_dictionary['result']) == type([])):
+            break
+        else:
+            logs.error(
+                f'Failed at generating proper json_dictionary object. Attempt {i} of 5. Waiting for 60 seconds...')
+            time.sleep(60)
+
+    if json_dictionary == None:
+        logs.error(f"Serious lag on UM Warszawa API's end")
+        logs.error('Ending script! Sending email just to let you know.')
+        sendemail(gmail_user, gmail_password, send_to) # provide your email credentials along with specific app password
+        exit()
+
+    elif 'result' not in json_dictionary:
+        logs.error(f'No result key in dictionary')
+        logs.error('Script crashed! Sending email just to let you know.')
+        sendemail(gmail_user, gmail_password, send_to) # provide your email credentials along with specific app password
+        exit()
+
+    elif type(json_dictionary['result']) != type([]):
+        logs.error(f"Error from UM Warszawa API::: {json_dictionary['result']}")
+        logs.error('Script crashed! Sending email just to let you know.')
+        sendemail(gmail_user, gmail_password, send_to) # provide your email credentials along with specific app password
+        exit()
+
     return json_dictionary
 
- 
-def make_stops_table(API_KEY: str) -> pd.DataFrame: 
-    """
-    Utwórz tabelę z podstawowywmi danymi przystankowymi.
 
+def make_stops_table(API_KEY: str) -> pd.DataFrame:
+    """
+    Make a DataFrame with basic stops data
     Arguments:
-        API_KEY: Generate your own API key here: https://api.um.warszawa.pl/# --> Hit 'logowanie' and then under 'Rejestracja konta' provide a login and password. Then insert the key into the 'credentials.json' file
-
+        API_KEY: api key from credentials.json
     Returns:
-        Dataframe m.in. ze współrzędnymi geograficznymi przystanków
+        Dataframe with data like geo coordinates of stops
     """
-
-    # Current day's stops info
+    # info about stops from current day
     stops_link = 'https://api.um.warszawa.pl/api/action/dbstore_get/?id=1c08a38c-ae09-46d2-8926-4f9d25cb0630&apikey=' \
-                 + API_KEY  
+                 + API_KEY
 
-    # Request data from API
+    # make a request for the API
     json_dictionary = get_data_from_link(stops_link)
 
-    # Create a dataframe
+    # create dataframe
     df = pd.json_normalize(json_dictionary['result'])
 
-    # Data format:
+    # all values are in a format:
     # {'value': '01', 'key': 'slupek'},
     # {'value': 'Kijowska', 'key': 'nazwa_zespolu'},
     # {'value': '2201', 'key': 'id_ulicy'},
     # ...
 
-    # Download column names based on the first row
+    # get column names based on keys from first observation
     column_names = df['values'].apply(pd.Series).iloc[0].apply(lambda x: x.get('key')).tolist()
 
-    # Assign column names to the table
+    # apply column names to dataframe
     df = df['values'].apply(pd.Series)
     df.columns = column_names
 
-    # Extract values from the dictionary and use them as values in the dataframe
+    # get values from dictionary and use them as values in dataframe
     for col in column_names:
         df[col] = df[col].apply(lambda x: x.get('value'))
 
@@ -80,35 +164,35 @@ def make_stops_table(API_KEY: str) -> pd.DataFrame:
 
 def add_lines_to_stops_table(df: pd.DataFrame, API_KEY: str) -> pd.DataFrame:
     """
-    Makes a request for each stop about the lines that run through the stop
-
-    Arguments:
-        df: table with brigades and stops data
-        API_KEY: inserted into 'credentials.json'
-    
+    Send a request to every stop about line numbers being used on that stop
+    Arguments:f
+        df: dataframe with stops informaction e.g. with 'zespół' and 'słupek'
+        API_KEY: api key from credentials.json
     Returns:
-        Table with additional column 'line', where all the line names are stored available
+        Original dataframe but with an extra column ('linie') containing every
+        line for every stop
     """
-    df['linie'] = None  # Insert empty column
+    df['linie'] = None  # insert empty column
 
-    # for each row make a request about stops information
+    # for every entry make a request about stop informations
     for index, row in tqdm.tqdm(df[['zespol', 'slupek']].iterrows(), total=df.shape[0]):
+
+        stop_watch = time.time()
         zespol = row['zespol']
         slupek = row['slupek']
 
         link = 'https://api.um.warszawa.pl/api/action/dbtimetable_get/?id=88cd555f-6f31-43ca-9de4-66c479ad5942&busstopId=' \
                + zespol + '&busstopNr=' + slupek + '&apikey=' + API_KEY
 
-        # API request
         json_dictionary = get_data_from_link(link)
 
-        # Convert the values to line names
+        # transform the information into line numbers
         lines = [elem.get('values')[0].get('value') for elem in json_dictionary['result']]
 
-        # Insert line names to the table
+        # insert line numbers into the dataframe
         df.loc[index, 'linie'] = lines
 
-    # Consider only 'active' stops
+    # leave only active stops and discard the rest
     df = df[df['linie'].map(lambda x: len(x) > 0)]
 
     return df
@@ -116,89 +200,96 @@ def add_lines_to_stops_table(df: pd.DataFrame, API_KEY: str) -> pd.DataFrame:
 
 def make_timetables_for_lines(df: pd.DataFrame, API_KEY: str, only_trams: bool = False) -> pd.DataFrame:
     """
-    Zadaje zapytanie do każdego numeru linii jaki występuje na każdym
-    przystanku o jego rozkład z danego przystanku
-
+    Send a request to every line number on every stop about the timetable for
+    that particulat line on that particular stop
     Arguments:
-        df: tabela z danymi przystankowymi oraz z numerami linii (z dodatkową kolumną 'linie')
-        API_KEY: klucz api z pliku credentials.json
-        only_trams: czy mają być zbierane rozkłady tylko dla tramwajów czy dla wszystkich typów pojazdów
-
+        df: DataFrame with stops data one line numbers (with the extra column 'linie)
+        API_KEY: api key from credentials.json
+        only_trams: do we want data only for trams or for all types of vehicles
     Return:
-        Tabela ze wszystkimi rozkładami dla każdej linii każdego przystanku
+        Table with every timetable for every line in every stop
     """
 
-    # określ typ pojazdu na podstawie jego numeru
+    # set a vehicle type based on its number
     df[
-        'typ'] = 'A'  # najpierw przypisz 'A' dla wszystkich pojazdów
-    # Tak czysto optymalizacyjnie, to jest lepsze rozwiązanie, przypisanie 'A' wszędzie tam, gdzie mowa o autobusach?
+        'typ'] = 'A'  # first assign 'A' to all types of vehicles
 
-    df.loc[df['linie'].apply(lambda x: str(x[0])[0] == 'W'), 'typ'] = 'WKD'  # oznacz WKD
-    df.loc[df['linie'].apply(lambda x: str(x[0])[0] == 'R'), 'typ'] = 'R'  # oznacz pociągi KM
-    df.loc[df['linie'].apply(lambda x: str(x[0])[0] == 'S'), 'typ'] = 'S'  # oznacz pociągi SKM
-    df.loc[df['linie'].apply(lambda x: str(x[0])[0] == 'M'), 'typ'] = 'M'  # oznacz pociągi metra
+    df.loc[df['linie'].apply(lambda x: str(x[0])[0] == 'W'), 'typ'] = 'WKD'  # assign WKD label
+    df.loc[df['linie'].apply(lambda x: str(x[0])[0] == 'R'), 'typ'] = 'R'  # assign KM train label
+    df.loc[df['linie'].apply(lambda x: str(x[0])[0] == 'S'), 'typ'] = 'S'  # assign SKM train label
+    df.loc[df['linie'].apply(lambda x: str(x[0])[0] == 'M'), 'typ'] = 'M'  # assign metro train label
     df = df.reset_index()
 
-    # znajdź indeksy tych wierszy, które mają oznaczenie 'A' i ich długość jest nie większa niż 2
+    # find the rows, that have 'A' and their length isn't greater then 2
     less_then_2_index = df[(df.typ == 'A') & (df.linie.apply(lambda x: len(x[0]) <= 2))].index.tolist()
 
-    df.loc[less_then_2_index, 'typ'] = 'T'  # oznacz tramwaje
+    df.loc[less_then_2_index, 'typ'] = 'T'  # assign tram label
 
-    # czy ograniczamy się jedynie do tramwajów
+    # restrict dataframe to only trams in onlty_trams == True
     if only_trams:
         df = df[df['typ'] == 'T']
 
-    lines_column = []
+    lines_column = []; trasa_column = []; brygada_column = []
 
-    # dla każdego numeru linii na każdym przystanku pobierz rozkłady jazdy
+    # for every line number on every stop get the timetable
     for index, row in tqdm.tqdm(df.iterrows(), total=df.shape[0]):
         zespol = row['zespol']
         slupek = row['slupek']
         linie = row['linie']
 
         czas_list = []
+        brygada_list = []
+        trasa_list = []
         for linia in linie:
             link = 'https://api.um.warszawa.pl/api/action/dbtimetable_get/?id=e923fa0e-d96c-43f9-ae6e-60518c9f3238&busstopId=' \
                    + zespol + '&busstopNr=' + slupek + '&line=' + linia + '&apikey=' + API_KEY
 
-            # zrób request do API
+            # make request to the API
             json_dictionary = get_data_from_link(link)
 
-            # pobierz rozkład dla danej linii 
+            # get timetable for line number 'linia'
             czas = tuple(d['value'] for d in
                          [json_dictionary['result'][n].get('values')[5] for n in range(len(json_dictionary['result']))])
+            brygada = tuple(d['value'] for d in \
+                [json_dictionary['result'][n].get('values')[2] for n in range(len(json_dictionary['result']))])
+            trasa = tuple(d['value'] for d in  \
+                [json_dictionary['result'][n].get('values')[4] for n in range(len(json_dictionary['result']))])
 
-            # usuń sekundy z czasów
+            # delete seconds from timetable
             czas = tuple([elem[:-3] if len(czas) >= 1 else elem for elem in czas])
             czas_list.append(czas)
+            brygada_list.append(brygada)
+            trasa_list.append(trasa)
+
         lines_column.append(dict(zip(linie, czas_list)))
+        brygada_column.append(dict(zip(linie, brygada_list)))
+        trasa_column.append(dict(zip(linie, trasa_list)))
 
     df['linie'] = lines_column
+    df['brygada'] = brygada_column
+    df['trasa'] = trasa_column
     return df
 
 
 def init_logging(logs: logging.Logger, file_name: str) -> logging.Logger:
     """
-    Funkcja do logowania informacji jednocześnie do konsoli i do pliku
-
+    Log information to the console and file
     Arguments:
-        logs: Domyślny logger z modułu logging
-        file_name: nazwa pliku, do którego mają być logowane dane
-    
+        logs: Default logger from logging module
+        file_name: log filename
     Returns:
-        Obiekt 'logs' z określonym formatem wpisów jakie mają być w nim umieszczane i
-        wskazanym plikiem do zapisywania logów.
+        Logs object with specified log format and name of log file
     """
     logs.setLevel(logging.DEBUG)
 
     logformat = logging.Formatter("%(asctime)s : %(levelname)s : %(message)s", datefmt='%y-%m-%d %H:%M:%S')
 
-    # logowanie do pliku
+    # log to file
     file = logging.FileHandler(file_name)
     file.setLevel(logging.INFO)
     file.setFormatter(logformat)
 
-    # logowanie do konsoli
+    # log to console
     stream = logging.StreamHandler()
     stream.setLevel(logging.INFO)
     stream.setFormatter(logformat)
@@ -211,39 +302,34 @@ def init_logging(logs: logging.Logger, file_name: str) -> logging.Logger:
 
 def load_api_key(credentials_file_name: str = 'credentials.json'):
     """
-    Wczytaj klucz api z pliku
-
+    Get API key from file
     Arguments:
-        credentials_file_name: nazwa pliku json z kluczem API
-
+        credentials_file_name: name of file where the API key is located
     Returns:
-        Klucz API potrzebny do składania zapytań do serwera UM Warszawa
+        API key needed for further requests
     """
     if os.path.exists(credentials_file_name):
         with open(credentials_file_name) as f:
             API_KEY = json.load(f)['API_KEY']
     else:
-        logs.error(f"Brak poprawnego pliku {credentials_file_name} z kluczem API")
-        input('Naciśnij dowolny klawisz, aby zakończyć.')
+        init_logging.logs.error(f"No file {credentials_file_name} with proper API key")
+        input('Press any key to end.')
         exit()
 
     return API_KEY
 
 
-while True:
+def run_script():
     if __name__ == '__main__':
 
-        # aktualna data i godzina
-        now = datetime.now().strftime("%Y-%m-%d")
-
-        # ___________________ Żeby skrypt się automatycznie odpalał raz dobę, trzeba zrezygnować z pytania użytkownika o rodzaj pobieranych danych ___________________
-
+        # current datetime
+        run_script.now = datetime.now().strftime("%Y-%m-%d")
         '''
-        zbieramy informacje o wszystkich pojazdach albo tylko o tramwajach
+        gather info about all types of vehicles or just trams
         while True:
-            only_trams = input('Co pobierać? \n [0] - cały rozkład; [1] - tylko tramwaje ')
+            only_trams = input('What to download? \n [0] - whole timetable; [1] - only trams ')
             if only_trams not in ['0', '1']:
-                print('Wprowadź poprawną wartość parametru!')
+                print('Enter proper value (0 or 1)!')
                 continue
             else:
                 only_trams = bool(int(only_trams))
@@ -251,35 +337,37 @@ while True:
         '''
         only_trams = True
 
-        # logowanie do pliku i do konsoli
+        # log to file and console
+        global logs
         logs = logging.getLogger(__name__)
         logs = init_logging(logs, 'StopsLog.log')
 
-        # wczytaj klucz API
+        # get API key
         API_KEY = load_api_key()
 
-        logs.info('Pobieranie podstawowych informacji o przystankach...')
+        logs.info('Downloading basic stops information...')
         df = make_stops_table(API_KEY)
 
-        logs.info('Pobieranie linii dla przystanków...')
+        logs.info('Downloading line numbers for stops...')
         df = add_lines_to_stops_table(df, API_KEY)
 
-        logs.info('Pobieranie rozkładów dla wszystkich linii...')
+        logs.info('Downloading timetables for all lines...')
         df = make_timetables_for_lines(df, API_KEY, only_trams=only_trams)
 
-        logs.info(f'Zapisywanie rozkładów do pliku rozklady_{now}.pkl')
+        logs.info(f'Saving data to rozklady_{run_script.now}.pkl')
         try:
-            df.to_pickle(f'rozklady_{now}.pkl', compression='zip')
+            df.to_pickle(f'rozklady_{run_script.now}.pkl', compression='zip')
         except Exception as err:
             logs.error(err)
 
-        logs.info('Czyszczenie pamięci...')
+        logs.info('Deleting unnecessary data from memory...')
         del df
         gc.collect()
 
-        logs.info('Download completed. Now waiting 24 hours for the restart')
-        for i in range(86400, 0, -3600):
-            time.sleep(3600)
-            print(str(int(i / 3600)) + str(' hours left to restart'))
+        logs.info('Download completed. The script will restart at 10:00')
 
-# Reading the data can be handled with simple --- pd.read_pickle ---
+print('The script will start running every day at 10:00 ...')
+schedule.every().day.at("13:52").do(run_script)
+
+while True:
+    schedule.run_pending()
